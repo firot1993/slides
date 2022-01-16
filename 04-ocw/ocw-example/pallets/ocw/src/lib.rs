@@ -6,7 +6,7 @@ pub use pallet::*;
 pub mod pallet {
 	//! A demonstration of an offchain worker that sends onchain callbacks
 	use core::{convert::TryInto, fmt};
-	use parity_scale_codec::{Decode, Encode};
+	use parity_scale_codec::{Decode, Encode, CompactAs};
 	use frame_support::pallet_prelude::*;
 	use frame_system::{
 		pallet_prelude::*,
@@ -49,6 +49,7 @@ pub mod pallet {
 
 	// We are fetching information from the github public API about organization`substrate-developer-hub`.
 	const HTTP_REMOTE_REQUEST: &str = "https://api.github.com/orgs/substrate-developer-hub";
+	const HTTP_POLKADOT_PRICE_REMOTE_REQUEST: &str = "https://api.coincap.io/v2/assets/polkadot";
 	const HTTP_HEADER_USER_AGENT: &str = "jimmychu0807";
 
 	const FETCH_TIMEOUT_PERIOD: u64 = 3000; // in milli-seconds
@@ -107,6 +108,19 @@ pub mod pallet {
 		public_repos: u32,
 	}
 
+	#[derive(Deserialize, Encode, Decode, Default)]
+	struct Data {
+		// Specify our own deserializing function to convert JSON string to vector of bytes
+		#[serde(deserialize_with = "de_string_to_bytes")]
+		priceUsd: Vec<u8>,
+	}
+
+
+	#[derive(Deserialize, Encode, Decode, Default)]
+	struct PriceInfo {
+		data: Data,
+	}
+
 	#[derive(Debug, Deserialize, Encode, Decode, Default)]
 	struct IndexingData(Vec<u8>, u64);
 
@@ -162,6 +176,7 @@ pub mod pallet {
 	#[pallet::generate_deposit(pub(super) fn deposit_event)]
 	pub enum Event<T: Config> {
 		NewNumber(Option<T::AccountId>, u64),
+		NewPrice(Option<T::AccountId>, (u64, Permill)),
 	}
 
 	// Errors inform users that something went wrong.
@@ -182,6 +197,7 @@ pub mod pallet {
 
 		// Error returned when fetching github info
 		HttpFetchingError,
+		HttpParseError,
 	}
 
 	#[pallet::hooks]
@@ -265,6 +281,16 @@ pub mod pallet {
 		}
 
 		#[pallet::weight(10000)]
+		pub fn submit_price_signed(origin: OriginFor<T>, price: (u64, Permill)) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			log::info!("submit_price_signed: ({}, {:?}, {:?})", price.0, price.1.encode_as(),  who);
+			Self::append_or_replace_price(price);
+
+			Self::deposit_event(Event::NewPrice(Some(who), price));
+			Ok(())
+		}
+
+		#[pallet::weight(10000)]
 		pub fn submit_number_unsigned(origin: OriginFor<T>, number: u64) -> DispatchResult {
 			let _ = ensure_none(origin)?;
 			log::info!("submit_number_unsigned: {}", number);
@@ -273,6 +299,7 @@ pub mod pallet {
 			Self::deposit_event(Event::NewNumber(None, number));
 			Ok(())
 		}
+
 
 		#[pallet::weight(10000)]
 		pub fn submit_number_unsigned_with_signed_payload(origin: OriginFor<T>, payload: Payload<T::Public>,
@@ -291,6 +318,17 @@ pub mod pallet {
 	}
 
 	impl<T: Config> Pallet<T> {
+
+		fn append_or_replace_price(price: (u64, Permill)) {
+			Prices::<T>::mutate(|prices| {
+				if prices.len() == NUM_VEC_LEN {
+					let _ = prices.pop_front();
+				}
+				prices.push_back(price);
+				log::info!("Price is: {:?}, {:?}", price.0, price.1.encode_as());
+			});
+		}
+
 		/// Append a new number to the tail of the list, removing an element from the head if reaching
 		///   the bounded length.
 		fn append_or_replace_number(number: u64) {
@@ -315,10 +353,117 @@ pub mod pallet {
 
 			// 这个 http 请求可得到当前 DOT 价格：
 			// [https://api.coincap.io/v2/assets/polkadot](https://api.coincap.io/v2/assets/polkadot)。
+			let price = Self::fetch_polkadot_price()?;
+			let signer = Signer::<T, T::AuthorityId>::any_account();
 
-			Ok(())
+			// Translating the current block number to number and submit it on-chain
+
+			// `result` is in the type of `Option<(Account<T>, Result<(), ()>)>`. It is:
+			//   - `None`: no account is available for sending transaction
+			//   - `Some((account, Ok(())))`: transaction is successfully sent
+			//   - `Some((account, Err(())))`: error occured when sending the transaction
+			let result = signer.send_signed_transaction(|_acct|
+				// This is the on-chain function
+				Call::submit_price_signed(price)
+			);
+
+			// Display error if the signed tx fails.
+			if let Some((acc, res)) = result {
+				if res.is_err() {
+					log::error!("failure: offchain_signed_tx: tx sent: {:?}", acc.id);
+					return Err(<Error<T>>::OffchainSignedTxError);
+				}
+				// Transaction is sent successfully
+				return Ok(());
+			}
+
+			// The case of `None`: no account is available for sending
+			log::error!("No local account available");
+			Err(<Error<T>>::NoLocalAcctForSigning)
 		}
 
+		fn fetch_polkadot_price() -> Result<(u64, Permill), Error<T>> {
+			// let price_info =  StorageValueRef::persistent(b"offchain-demo::gh-info");
+			let mut price: (u64, Permill) = (0, Default::default());
+			let mut lock = StorageLock::<BlockAndTime<Self>>::with_block_and_time_deadline(
+				b"offchain-demo-price::lock", LOCK_BLOCK_EXPIRATION,
+				rt_offchain::Duration::from_millis(LOCK_TIMEOUT_EXPIRATION)
+			);
+			if let Ok(_guard) = lock.try_lock() {
+				match Self::fetch_polkadot_price_parse() {
+					Ok(price_info) => {
+						let s = match str::from_utf8(&price_info.data.priceUsd){
+							Ok(v) => {
+								let mut split = v.split(".");
+								let vec = split.collect::<Vec<&str>>();
+								log::info!("{:?}", vec);
+								let fp: u64 = vec[0].parse().unwrap();
+								let sp: u32 = (&vec[1][..3]).parse().unwrap();
+								log::info!("{},{}", fp, sp);
+								price = (fp, Permill::from_perthousand(sp));
+							}
+							Err(_) => { return Err(<Error<T>>::HttpFetchingError); }
+						};
+					}
+					Err(err) => { return Err(err); }
+				}
+			}
+			if price.0 == 0 {
+				return Err(<Error<T>>::HttpFetchingError);
+			}
+			Ok(price)
+		}
+
+		fn fetch_polkadot_price_parse() -> Result<PriceInfo, Error<T>> {
+			let resp_bytes = Self::fetch_polkadot_price_from_remote().map_err(|e| {
+				log::error!("fetch_from_remote error: {:?}", e);
+				<Error<T>>::HttpFetchingError
+			})?;
+
+			let resp_str = str::from_utf8(&resp_bytes).map_err(|_| <Error<T>>::HttpFetchingError)?;
+			// Print out our fetched JSON string
+			log::info!("{}", resp_str);
+			let price_info: PriceInfo =
+				serde_json::from_str(&resp_str).map_err(|_| <Error<T>>::HttpParseError)?;
+			log::info!("{:?}", price_info.data.priceUsd);
+			Ok(price_info)
+		}
+
+		fn fetch_polkadot_price_from_remote() -> Result<Vec<u8>, Error<T>> {
+			log::info!("sending request to: {}", HTTP_POLKADOT_PRICE_REMOTE_REQUEST);
+
+			// Initiate an external HTTP GET request. This is using high-level wrappers from `sp_runtime`.
+			let request = rt_offchain::http::Request::get(HTTP_POLKADOT_PRICE_REMOTE_REQUEST);
+
+			// Keeping the offchain worker execution time reasonable, so limiting the call to be within 3s.
+			let timeout = sp_io::offchain::timestamp()
+				.add(rt_offchain::Duration::from_millis(FETCH_TIMEOUT_PERIOD));
+
+			// For github API request, we also need to specify `user-agent` in http request header.
+			//   See: https://developer.github.com/v3/#user-agent-required
+			let pending = request
+				.add_header("User-Agent", HTTP_HEADER_USER_AGENT)
+				.deadline(timeout) // Setting the timeout time
+				.send() // Sending the request out by the host
+				.map_err(|_| <Error<T>>::HttpFetchingError)?;
+
+			// By default, the http request is async from the runtime perspective. So we are asking the
+			//   runtime to wait here.
+			// The returning value here is a `Result` of `Result`, so we are unwrapping it twice by two `?`
+			//   ref: https://substrate.dev/rustdocs/v2.0.0/sp_runtime/offchain/http/struct.PendingRequest.html#method.try_wait
+			let response = pending
+				.try_wait(timeout)
+				.map_err(|_| <Error<T>>::HttpFetchingError)?
+				.map_err(|_| <Error<T>>::HttpFetchingError)?;
+
+			if response.code != 200 {
+				log::error!("Unexpected http request status code: {}", response.code);
+				return Err(<Error<T>>::HttpFetchingError);
+			}
+
+			// Next we fully read the response body and collect it to a vector of bytes.
+			Ok(response.body().collect::<Vec<u8>>())
+		}
 
 		/// Check if we have fetched github info before. If yes, we can use the cached version
 		///   stored in off-chain worker storage `storage`. If not, we fetch the remote info and

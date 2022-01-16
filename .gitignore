@@ -19,3 +19,9 @@
 
 # will have compiled files and executables
 **/target/
+04-ocw/ocw-example/.idea/vcs.xml
+04-ocw/ocw-example/.idea/sonarlint/issuestore/index.pb
+04-ocw/ocw-example/.idea/ocw-example.iml
+04-ocw/ocw-example/.idea/modules.xml
+04-ocw/ocw-example/.idea/codeStyles/Project.xml
+04-ocw/ocw-example/.idea/codeStyles/codeStyleConfig.xml
