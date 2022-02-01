@@ -19,3 +19,8 @@
 
 # will have compiled files and executables
 **/target/
+03_polkadot-js-api/kitties/substrate/.idea/vcs.xml
+03_polkadot-js-api/kitties/substrate/.idea/substrate.iml
+03_polkadot-js-api/kitties/substrate/.idea/modules.xml
+03_polkadot-js-api/kitties/substrate/.idea/codeStyles/Project.xml
+03_polkadot-js-api/kitties/substrate/.idea/codeStyles/codeStyleConfig.xml

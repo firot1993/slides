@@ -1,6 +1,13 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
+#[cfg(feature = "runtime-benchmarks")]
+mod benchmarking;
+
+pub mod weights;
+
+use weights::*;
 pub use pallet::*;
+
 
 #[frame_support::pallet]
 pub mod pallet {
@@ -8,6 +15,8 @@ pub mod pallet {
 	use frame_system::pallet_prelude::*;
 	use codec::{Encode, Decode};
 	use sp_io::hashing::blake2_128;
+	use crate::WeightInfo;
+
 
 	#[derive(Encode, Decode)]
 	pub struct Kitty(pub [u8;16]);
@@ -18,6 +27,7 @@ pub mod pallet {
 	pub trait Config: frame_system::Config {
 		type Event: From<Event<Self>> + IsType<<Self as frame_system::Config>::Event>;
 		type Randomness: Randomness<Self::Hash, Self::BlockNumber>;
+		type WeightInfo: WeightInfo;
 	}
 
 	#[pallet::pallet]
@@ -54,8 +64,8 @@ pub mod pallet {
 
 	#[pallet::call]
 	impl<T:Config> Pallet<T> {
-		#[pallet::weight(0)]
-		pub fn create(origin: OriginFor<T>) -> DispatchResult {
+		#[pallet::weight(T::WeightInfo::create(*_i))]
+		pub fn create(origin: OriginFor<T>, _i: u32) -> DispatchResult {
 			let who = ensure_signed(origin)?;
 
 			let kitty_id = match Self::kitties_count() {

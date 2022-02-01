@@ -276,6 +276,7 @@ impl pallet_template::Config for Runtime {
 impl pallet_kitties::Config for Runtime {
 	type Event = Event;
 	type Randomness = RandomnessCollectiveFlip;
+	type WeightInfo = pallet_kitties::weights::SubstrateWeight<Runtime>;
 }
 
 // Create the runtime by composing the FRAME pallets that were previously configured.
@@ -296,7 +297,6 @@ construct_runtime!(
 		// Include the custom logic from the pallet-template in the runtime.
 		TemplateModule: pallet_template::{Pallet, Call, Storage, Event<T>},
 		KittiesModule: pallet_kitties::{Pallet, Call, Storage, Event<T>},
-
 	}
 );
 
@@ -483,6 +483,7 @@ impl_runtime_apis! {
 			add_benchmark!(params, batches, pallet_balances, Balances);
 			add_benchmark!(params, batches, pallet_timestamp, Timestamp);
 			add_benchmark!(params, batches, pallet_template, TemplateModule);
+			add_benchmark!(params, batches, pallet_kitties, KittiesModule);
 
 			if batches.is_empty() { return Err("Benchmark not found for this pallet.".into()) }
 			Ok(batches)
